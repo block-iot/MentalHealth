@@ -1,15 +1,17 @@
+import numpy as np
+import pandas as pd
 import torch
 import torch.nn as nn
 import torch.optim as optim
 from sklearn.model_selection import train_test_split
-import pandas as pd
+from torch.utils.data import DataLoader, TensorDataset
 from scipy.io import loadmat
 
 
 def GetDataFrame():
 
-    numeric_data_mat = loadmat('../data/covid_t1/numeric_data.mat')
-    numeric_data_df = pd.read_csv("../data/week1_csv/numeric_data.csv", header=None)
+    numeric_data_mat = loadmat('../data/covid_t1/numeric_data_t1.mat')
+    numeric_data_df = pd.read_csv("../data/extra/output.csv", header=None)
 
     numeric_headers = []
 
@@ -21,67 +23,115 @@ def GetDataFrame():
     return numeric_data_df
 
 
-# Define the neural network architecture
-class Net(nn.Module):
-    def __init__(self):
-        super(Net, self).__init__()
-        
-        # Define layers
-        self.fc1 = nn.Linear(4, 128)
+#WHERE IS TIMESTAMP COL?
+# stai_s_score/columns, stai_t_score/columns
+def filter_df(numeric_data_df):
+
+
+    remove_cols = numeric_data_df.loc[:,numeric_data_df.isnull().any()].columns.tolist()
+
+    if "sds_s_score" in remove_cols:
+        remove_cols.remove("sds_s_score")
+
+    if "stai_s_score" in remove_cols:
+        remove_cols.remove("stai_s_score")
+
+    additionalCols = ["stai_t_score"]
+    for i in range(1, 21):
+        if i != 2:
+            additionalCols.extend(["sds_" + str(i), "stais" + str(i), "stait" + str(i)])
+
+    remove_cols.extend(additionalCols)
+    remove_cols = list(set(remove_cols))
+    numeric_data_df.drop(remove_cols, axis=1, inplace=True)  
+    
+     
+
+    numeric_data_df = numeric_data_df.select_dtypes(include=['float64', 'int64'])
+    return numeric_data_df.dropna(subset=['sds_score', 'stai_s_score'])
+
+
+
+
+
+class NeuralNet(nn.Module):
+    def __init__(self, input_dim):
+        super(NeuralNet, self).__init__()
+        self.fc1 = nn.Linear(input_dim, 128)
         self.fc2 = nn.Linear(128, 64)
-        self.fc3 = nn.Linear(64, 1)
-        
+        self.fc3 = nn.Linear(64, 2)
+
     def forward(self, x):
         x = torch.relu(self.fc1(x))
         x = torch.relu(self.fc2(x))
-        x = self.fc3(x)  # No activation for regression output
-        return x
+        return self.fc3(x)
+
 
 
 numeric_data_df = GetDataFrame()
 
-# Splitting the data
-X = numeric_data_df[["age", "gender", "edu_level", "job"]].values
-y = numeric_data_df["stai_s_score"].values
+numeric_data_df = filter_df(numeric_data_df)
 
-X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.3, random_state=42)
 
-# Convert to PyTorch tensors
-X_train_tensor = torch.tensor(X_train, dtype=torch.float32)
-y_train_tensor = torch.tensor(y_train, dtype=torch.float32).view(-1, 1)
+X = numeric_data_df.drop(['sds_score', 'stai_s_score'], axis=1).values
 
-X_test_tensor = torch.tensor(X_test, dtype=torch.float32)
-y_test_tensor = torch.tensor(y_test, dtype=torch.float32).view(-1, 1)
+y = numeric_data_df[['sds_score', 'stai_s_score']].values
 
-# Instantiate the network, loss, and optimizer
-net = Net()
+
+X_train, X_temp, y_train, y_temp = train_test_split(X, y, test_size=0.3, random_state=42)
+
+X_test, X_val, y_test, y_val = train_test_split(X_temp, y_temp, test_size=0.33, random_state=42)
+
+
+
+#Conver to Tensor Flow and DataLoaders 
+batch_size = 64
+
+train_data = TensorDataset(torch.FloatTensor(X_train), torch.FloatTensor(y_train))
+train_loader = DataLoader(train_data, shuffle=True, batch_size=batch_size)
+
+test_data = TensorDataset(torch.FloatTensor(X_test), torch.FloatTensor(y_test))
+test_loader = DataLoader(test_data, shuffle=True, batch_size=batch_size)
+
+val_data = TensorDataset(torch.FloatTensor(X_val), torch.FloatTensor(y_val))
+val_loader = DataLoader(val_data, shuffle=True, batch_size=batch_size)
+
+
+model = NeuralNet(266)
+
 criterion = nn.MSELoss()
-optimizer = optim.Adam(net.parameters(), lr=0.001)
+optimizer = optim.Adam(model.parameters(), lr=0.001)
 
-# Training loop
-epochs = 500
+# Train the model
+epochs = 38
 for epoch in range(epochs):
-    # Zero the parameter gradients
-    optimizer.zero_grad()
+    model.train()
+    for inputs, labels in train_loader:
+        optimizer.zero_grad()
+        outputs = model(inputs)
+        loss = criterion(outputs, labels)
+        loss.backward()
+        optimizer.step()
 
-    # Forward pass
-    outputs = net(X_train_tensor)
-    
-    # Compute loss
-    loss = criterion(outputs, y_train_tensor)
-    
-    # Backward pass and optimize
-    loss.backward()
-    optimizer.step()
+    # Validate the model
+    model.eval()
+    val_loss = 0.0
+    with torch.no_grad():
+        for inputs, labels in val_loader:
+            outputs = model(inputs)
+            loss = criterion(outputs, labels)
+            val_loss += loss.item()
 
-    # Print statistics
-    if epoch % 50 == 0:
-        print(f"Epoch [{epoch + 1}/{epochs}], Loss: {loss.item():.4f}")
+    print(f"Epoch {epoch+1}/{epochs} - Training Loss: {loss.item():.4f} - Validation Loss: {val_loss/len(val_loader):.4f}")
 
-print('Finished Training')
 
-# Evaluate on the test set
+model.eval()
+test_loss = 0.0
 with torch.no_grad():
-    test_outputs = net(X_test_tensor)
-    test_loss = criterion(test_outputs, y_test_tensor)
-    print(f"Test Loss: {test_loss.item():.4f}")
+    for inputs, labels in test_loader:
+        outputs = model(inputs)
+        loss = criterion(outputs, labels)
+        test_loss += loss.item()
+
+print(f"Test Loss: {test_loss/len(test_loader):.4f}")
+
